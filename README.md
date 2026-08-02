@@ -1,8 +1,25 @@
-<p align="center">
-  <img src=".github/assets/kook.png" width="64" />
+<div align="center">
+
+<img src=".github/assets/ErisPulseLogo.png" width="180" alt="ErisPulse KookAdapter" />
+
+# ErisPulse KookAdapter
+
+**Kook（开黑啦）机器人适配器 —— 基于 ErisPulse 框架。**
+
+基于开源机器人框架 ErisPulse 的 Kook（开黑啦）机器人适配器，支持频道 / 私信消息收发、KMarkdown、卡片消息、@提及与回复等完整能力。
+
+<p>
+  <a href="https://pypi.org/project/ErisPulse-KookAdapter/"><img src="https://img.shields.io/pypi/v/ErisPulse-KookAdapter?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ErisPulse-KookAdapter/"><img src="https://img.shields.io/badge/Python-3.10+-FFD43B?style=for-the-badge&logo=python&logoColor=blue" alt="Python"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/ErisPulse/ErisPulse-KookAdapter"><img src="https://img.shields.io/github/stars/ErisPulse/ErisPulse-KookAdapter?style=for-the-badge&logo=github&color=brightgreen" alt="Stars"></a>
+  <a href="https://pepy.tech/project/ErisPulse-KookAdapter"><img src="https://img.shields.io/pepy/dt/ErisPulse-KookAdapter?style=for-the-badge&color=blue" alt="Downloads"></a>
+  <a href="https://github.com/ErisPulse/ErisPulse"><img src="https://img.shields.io/badge/Powered_by-ErisPulse-FF6B9D?style=for-the-badge&logo=bookstack&logoColor=white" alt="ErisPulse"></a>
 </p>
-<h1 align="center">ErisPulse-KookAdapter</h1>
-基于开源机器人框架 ErisPulse 的Kook(开黑啦)机器人适配器。
+
+</div>
+
+---
 
 项目目前已托管至PyPi，使用以下命令以完成安装：
 ```bash
