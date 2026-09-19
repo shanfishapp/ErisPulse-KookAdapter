@@ -1,6 +1,6 @@
 [project]
 name = "ErisPulse-KookAdapter"
-version = "4.0.0"
+version = "4.1.0"
 description = "ErisPulse Kook Adapter - Kook平台适配器"
 readme = "README.md"
 license = {text = "Apache-2.0"}

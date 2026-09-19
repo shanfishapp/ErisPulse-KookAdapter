@@ -6,11 +6,21 @@ from typing import Any, Dict
 
 from ErisPulse.Core import client
 from ErisPulse.Core.Bases.adapter import BaseAdapter
+from ErisPulse.Core.Bases import BotAccountConfig
 from ErisPulse.Core.Bases.websocket import WSMessage
-from ErisPulse.runtime.config_schema import BotAccountConfig, dict_to_dataclass
 
 from .CallApi import CallApi
 from .Converter import KookAdapterConverter
+
+try:
+    from ErisPulse.runtime.tasks import spawn_background
+except ImportError:  # pragma: no cover
+    spawn_background = None
+
+__version__ = "4.1.0"
+
+# 软依赖的框架最低版本（运行时检测，仅提示不强制）
+MIN_FRAMEWORK_VERSION = (2, 7, 1)
 
 
 @dataclass
@@ -55,62 +65,69 @@ class KookAdapter(BaseAdapter):
         self._connect_tasks: Dict[str, asyncio.Task] = {}
         self._running = False
 
+        self._check_framework_version()
+        self._get_logger().info(f"KookAdapter v{__version__} 已加载")
+
+    @staticmethod
+    def _parse_version(version_str: str) -> tuple:
+        """解析版本号为可比较的三元组（忽略 dev/预发布后缀，如 2.8.0-dev.3 → (2, 8, 0)）"""
+        parts = []
+        for piece in str(version_str).split("."):
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts[:3])
+
+    def _check_framework_version(self):
+        """软依赖检测：框架版本过低时打警告（不阻断加载）"""
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            raw = _pkg_version("ErisPulse")
+        except Exception:
+            return
+        try:
+            if self._parse_version(raw) < MIN_FRAMEWORK_VERSION:
+                self._get_logger().warning(
+                    f"当前 ErisPulse 版本 {raw} 过低：KookAdapter v{__version__} 需要 >= "
+                    f"{'.'.join(map(str, MIN_FRAMEWORK_VERSION))}"
+                    "（BaseConverter / Api DSL / spawn_background 等特性），"
+                    "部分功能可能不可用，建议升级框架"
+                )
+        except Exception:
+            pass
+
     def _get_config_key(self) -> str:
         return "KookAdapter"
 
-    def _load_accounts(self) -> dict:
-        from ErisPulse.Core.config import config as config_mgr
+    def _migrate_legacy_config(self):
+        """将旧版扁平配置（[KookAdapter] token=...）迁移到 accounts 结构"""
+        try:
+            from ErisPulse.Core import config as config_mgr
 
-        key = "KookAdapter.accounts"
-        data = config_mgr.getConfig(key)
-
-        if not data:
-            old_config = config_mgr.getConfig("KookAdapter")
-            if old_config and "token" in old_config:
-                self.logger.warning("检测到旧格式配置，建议迁移到新格式")
-                self.logger.warning(
-                    "迁移方法：将现有配置移动到 KookAdapter.accounts.default 下"
-                )
-                data = {
-                    "default": {
-                        "token": old_config.get("token", ""),
-                        "bot_id": old_config.get("bot_id", ""),
-                        "compress": old_config.get("compress", True),
-                        "enabled": True,
-                    }
+            key = self._get_config_key()
+            data = config_mgr.getConfig(key)
+            if not isinstance(data, dict):
+                return
+            accounts = data.get("accounts")
+            if isinstance(accounts, dict) and accounts:
+                return
+            token = data.get("token")
+            if not token:
+                return
+            data["accounts"] = {
+                "default": {
+                    "token": token,
+                    "bot_id": data.get("bot_id", ""),
+                    "compress": data.get("compress", True),
+                    "enabled": True,
                 }
-                self.logger.warning(
-                    "已临时加载旧配置为默认账户，请尽快迁移到新格式"
-                )
-            else:
-                self.logger.info("未找到配置文件，创建默认账户配置")
-                data = {
-                    "default": {
-                        "token": "",
-                        "bot_id": "",
-                        "compress": True,
-                        "enabled": True,
-                    }
-                }
-                try:
-                    config_mgr.setConfig(key, data)
-                except Exception as e:
-                    self.logger.error(f"保存默认账户配置失败: {str(e)}")
-
-        accounts = {}
-        for name, account_data in data.items():
-            if not isinstance(account_data, dict):
-                continue
-            if "token" not in account_data or not account_data["token"]:
-                self.logger.error(f"账户 {name} 缺少token配置，已跳过")
-                continue
-
-            instance = dict_to_dataclass(KookAccountConfig, account_data)
-            instance.name = name
-            accounts[name] = instance
-
-        self.logger.info(f"Kook适配器初始化完成，共加载 {len(accounts)} 个账户")
-        return accounts
+            }
+            config_mgr.setConfig(key, data)
+            self.logger.info("已将旧版扁平配置迁移到 accounts.default")
+        except Exception as e:
+            self.logger.debug(f"旧配置迁移检查跳过: {e}")
 
     def _get_runtime(self, account_name: str) -> dict:
         """获取/创建某个账户的运行时状态"""
@@ -145,6 +162,9 @@ class KookAdapter(BaseAdapter):
         self._running = True
 
         for account_name, account in self.enabled_accounts.items():
+            if not account.token:
+                self.logger.warning(f"账户 {account_name} 缺少token配置，已跳过")
+                continue
             rt = self._get_runtime(account_name)
 
             bot_id = self._infer_bot_id(account)
@@ -158,8 +178,10 @@ class KookAdapter(BaseAdapter):
 
             await self.emit_meta("connect", bot_id)
 
-            self._connect_tasks[account_name] = asyncio.create_task(
-                self._connect_account(account_name)
+            coro = self._connect_account(account_name)
+            # 生命周期任务使用 spawn_background（owner 归属，shutdown 自动回收）
+            self._connect_tasks[account_name] = (
+                spawn_background(coro) if spawn_background is not None else asyncio.create_task(coro)
             )
             self.logger.info(
                 f"账户 {account_name} (bot_id: {bot_id}) 已启动"
@@ -617,6 +639,150 @@ class KookAdapter(BaseAdapter):
             raise ValueError(f"未知的 API endpoint: {endpoint}")
 
     # ------------------------------------------------------------------
+    # Api 类（OneBot12 标准Api动作映射）
+    # ------------------------------------------------------------------
+    class Api(BaseAdapter.Api):
+        """Kook 标准 API 动作实现（ApiDSL）
+
+        {!--< tips >!--}
+        1. get_self_info → GET /users/@me
+        2. get_user_info → POST /user/view
+        3. get_guild_info → POST /guild/view；get_guild_list → POST /guild/list
+        4. get_channel_info → POST /channel/view；get_channel_list → POST /channel/list
+        5. delete_message → POST /message/delete（Kook 仅需 msg_id）
+        {!--< /tips >!--}
+        """
+
+        @property
+        def _api(self):
+            account_name = self._adapter._resolve_account(self._account_id)[0]
+            rt = self._adapter._get_runtime(account_name)
+            return rt.get("api")
+
+        async def get_self_info(self) -> dict:
+            r = await self._api.request("GET", "/users/@me")
+            if r.get("status") != "ok":
+                return r
+            u = r.get("data") or {}
+            r["data"] = {
+                "user_id": str(u.get("id", "")),
+                "user_name": u.get("username", ""),
+                "user_displayname": u.get("nickname") or u.get("username", ""),
+                "user_avatar": u.get("avatar", ""),
+                "bot": bool(u.get("bot", False)),
+            }
+            return r
+
+        async def get_user_info(self, user_id: str) -> dict:
+            r = await self._api.request("POST", "/user/view", {"user_id": str(user_id)})
+            if r.get("status") != "ok":
+                return r
+            u = r.get("data") or {}
+            r["data"] = {
+                "user_id": str(u.get("id", user_id)),
+                "user_name": u.get("username", ""),
+                "user_displayname": u.get("nickname") or u.get("username", ""),
+                "user_avatar": u.get("avatar", ""),
+                "bot": bool(u.get("bot", False)),
+            }
+            return r
+
+        async def get_guild_info(self, guild_id: str) -> dict:
+            r = await self._api.request("POST", "/guild/view", {"guild_id": str(guild_id)})
+            if r.get("status") != "ok":
+                return r
+            g = r.get("data") or {}
+            r["data"] = {
+                "group_id": str(g.get("id", guild_id)),
+                "group_name": g.get("name", ""),
+                "group_avatar": g.get("icon", ""),
+                "group_member_count": g.get("user_count", 0),
+                "group_master_id": str(g.get("master_id", "")),
+            }
+            return r
+
+        async def get_guild_list(self, page: int = 1, page_size: int = 50) -> dict:
+            r = await self._api.request(
+                "POST", "/guild/list", {"page": int(page), "page_size": int(page_size)}
+            )
+            if r.get("status") != "ok":
+                return r
+            items = r.get("data", {}).get("items", []) or []
+            r["data"] = [
+                {"group_id": str(g.get("id", "")), "group_name": g.get("name", "")}
+                for g in items
+                if isinstance(g, dict)
+            ]
+            return r
+
+        async def get_channel_info(self, channel_id: str) -> dict:
+            r = await self._api.request("POST", "/channel/view", {"channel_id": str(channel_id)})
+            if r.get("status") != "ok":
+                return r
+            c = r.get("data") or {}
+            r["data"] = {
+                "channel_id": str(c.get("id", channel_id)),
+                "channel_name": c.get("name", ""),
+                "channel_type": c.get("type", ""),
+                "guild_id": str(c.get("guild_id", "")),
+            }
+            return r
+
+        async def get_channel_list(self, guild_id: str, page: int = 1, page_size: int = 50) -> dict:
+            r = await self._api.request(
+                "POST",
+                "/channel/list",
+                {"guild_id": str(guild_id), "page": int(page), "page_size": int(page_size)},
+            )
+            if r.get("status") != "ok":
+                return r
+            items = r.get("data", {}).get("items", []) or []
+            r["data"] = [
+                {"channel_id": str(c.get("id", "")), "channel_name": c.get("name", "")}
+                for c in items
+                if isinstance(c, dict)
+            ]
+            return r
+
+        async def get_channel_member_list(self, channel_id: str) -> dict:
+            """获取频道内成员列表（扩展动作）"""
+            return await self._api.request(
+                "POST", "/channel/user-list", {"channel_id": str(channel_id)}
+            )
+
+        async def delete_message(self, message_id: str) -> dict:
+            return await self._adapter.call_api(
+                endpoint="/message/delete",
+                _account_id=self._account_id,
+                msg_id=str(message_id),
+            )
+
+        async def get_status(self) -> dict:
+            ad = self._adapter
+            bots = []
+            for name, rt in ad._account_runtime.items():
+                bots.append({
+                    "self": {"platform": ad.platform, "user_id": rt.get("bot_id", ""), "account_id": name},
+                    "online": bool(rt.get("websocket") is not None),
+                })
+            return ad.make_response(data={"good": any(b["online"] for b in bots), "bots": bots})
+
+        async def get_version(self) -> dict:
+            from . import __version__
+
+            return self._adapter.make_response(
+                data={"impl": "ErisPulse-KookAdapter", "version": __version__, "onebot_version": "12"}
+            )
+
+        async def get_supported_actions(self) -> dict:
+            actions = {
+                "get_self_info", "get_user_info", "get_guild_info", "get_guild_list",
+                "get_channel_info", "get_channel_list", "get_channel_member_list",
+                "delete_message", "get_status", "get_version", "get_supported_actions",
+            }
+            return self._adapter.make_response(data=sorted(actions))
+
+    # ------------------------------------------------------------------
     # Send 类
     # ------------------------------------------------------------------
     class Send(BaseAdapter.Send):
@@ -652,6 +818,22 @@ class KookAdapter(BaseAdapter):
 
         def Text(self, text: str):
             return self.Raw_ob12([{"type": "text", "data": {"text": text}}])
+
+        _keyboard_rows = None
+
+        def Keyboard(self, rows):
+            """
+            附加按钮/键盘（跨平台交互组件标准）
+
+            :param rows: 通用标准结构 [[{"label": "..", "type": "callback|link", "data": ".."}]]
+            :return: Send 实例，支持链式调用
+
+            :example:
+            >>> rows = [[{"label": "选项A", "type": "callback", "data": "vote:A"}]]
+            >>> await kook.Send.To("channel", cid).Keyboard(rows).Text("请选择")
+            """
+            self._keyboard_rows = rows
+            return self
 
         def Image(self, file):
             return self.Raw_ob12([{"type": "image", "data": {"file": file}}])
@@ -710,8 +892,22 @@ class KookAdapter(BaseAdapter):
                 else:
                     segments = message
 
+                # 标准 keyboard 段（跨平台交互组件标准）→ Kook 卡片 action-group
+                keyboard_rows = self._keyboard_rows
+                kb_segments = [
+                    s for s in segments if isinstance(s, dict) and s.get("type") == "keyboard"
+                ]
+                if kb_segments:
+                    keyboard_rows = kb_segments[-1].get("data", {}).get("rows", [])
+                    segments = [
+                        s for s in segments
+                        if not (isinstance(s, dict) and s.get("type") == "keyboard")
+                    ]
+                self._keyboard_rows = None
+
                 modifiers = self._build_modifiers()
                 results = []
+                pending_text = ""
 
                 for segment in segments:
                     seg_type = segment.get("type")
@@ -738,6 +934,10 @@ class KookAdapter(BaseAdapter):
                         content = seg_data.get("text") or seg_data.get("markdown", "")
                         if kook_type == 10:
                             content = json.dumps(seg_data.get("card", {}))
+                        # 携带键盘的文本 → 组合为卡片消息（section + action-group）
+                        if keyboard_rows is not None:
+                            pending_text = content
+                            continue
                     elif seg_type == "kook_card":
                         content = json.dumps(seg_data.get("card", {}))
                         kook_type = 10
@@ -765,6 +965,20 @@ class KookAdapter(BaseAdapter):
                     )
                     results.append(result)
 
+                # 有键盘未消费时，将暂存文本组装为卡片消息发送
+                if keyboard_rows is not None:
+                    card = self._build_keyboard_card(pending_text, keyboard_rows)
+                    result = await self._adapter.call_api(
+                        endpoint="/message/create",
+                        _account_id=self.send_context.get("account_id"),
+                        target_type=self._target_type,
+                        target_id=self._target_id,
+                        content=json.dumps(card),
+                        type=10,
+                        **modifiers,
+                    )
+                    results.append(result)
+
                 return (
                     results[-1]
                     if results
@@ -772,6 +986,36 @@ class KookAdapter(BaseAdapter):
                 )
 
             return asyncio.create_task(_send())
+
+        @staticmethod
+        def _build_keyboard_card(text: str, rows) -> list:
+            """通用 keyboard rows → Kook 卡片（section + action-group）
+
+            按钮映射：callback → click:return + value；link → click:link + url
+            """
+            modules = []
+            if text:
+                modules.append({
+                    "type": "section",
+                    "text": {"type": "kmarkdown", "content": text},
+                })
+            elements = []
+            for row in rows or []:
+                for b in row or []:
+                    if not isinstance(b, dict):
+                        continue
+                    label = b.get("label", "")
+                    btn = {"type": "button", "text": {"type": "plain-text", "content": label}}
+                    if b.get("type") == "link":
+                        btn["click"] = "link"
+                        btn["url"] = b.get("data", "")
+                    else:
+                        btn["click"] = "return"
+                        btn["value"] = b.get("data", "")
+                    elements.append(btn)
+            if elements:
+                modules.append({"type": "action-group", "elements": elements})
+            return [{"type": "card", "modules": modules}]
 
         def Edit(self, msg_id: str, content: str):
             """编辑消息（仅支持 KMarkdown 和 CardMessage）"""

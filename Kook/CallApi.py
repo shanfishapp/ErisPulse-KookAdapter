@@ -402,3 +402,23 @@ class CallApi:
         if raw.get("code") == 0:
             return raw.get("data", {}).get("url", "")
         return ""
+
+    async def request(self, method: str, path: str, params: dict = None) -> dict:
+        """通用 Kook v3 REST 请求（Api DSL 使用）
+
+        :param method: HTTP 方法（GET 时 params 作为 query）
+        :param path: API 路径（如 "/users/@me"）
+        :param params: 请求参数
+        """
+        if not self.token:
+            return self._token_error()
+        url = f"https://www.kookapp.cn/api/v3{path}"
+        try:
+            if method.upper() == "GET":
+                resp = await client.get(url, params=params or {}, headers=self._headers())
+            else:
+                resp = await client.post(url, json=params or {}, headers=self._headers())
+            raw = await resp.json()
+            return self._standardize(raw)
+        except Exception as e:
+            return self.adapter.make_error(retcode=33000, message=f"Kook API 请求异常: {e}", raw=None)

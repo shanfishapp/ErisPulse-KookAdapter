@@ -7,41 +7,38 @@ import json
 import uuid
 import time
 
+from ErisPulse.Core.Bases import BaseConverter
 
-class KookAdapterConverter:
+
+class KookAdapterConverter(BaseConverter):
     def __init__(self):
+        super().__init__(platform="kook")
         from ErisPulse.Core import logger
         self.logger = logger.get_child("KookAdapterConverter")
         self.bot_id = ""
 
     def set_bot_id(self, bot_id: str):
         self.bot_id = bot_id
-    
+
     def convert(self, data):
         d = data.get("d", {})
         extra = d.get("extra", {})
         author = extra.get("author", {})
         kook_type = d.get("type", 0)
         channel_type = d.get("channel_type", "")
-        
+
+        # 基础事件结构（BaseConverter 骨架 + Kook 语义覆盖）
         if kook_type != 255:
             event_id = d.get("msg_id", str(uuid.uuid4()).replace("-", ""))
         else:
             event_id = str(uuid.uuid4()).replace("-", "")
-        
-        onebot_data = {
-            "id": event_id,
-            "time": int(time.time()),
-            "type": self._get_message_type(data),
-            "detail_type": self._get_detail_type(data),
-            "platform": "kook",
-            "self": {
-                "platform": "kook",
-                "user_id": self.bot_id
-            },
-            "kook_raw": data,
-            "kook_raw_type": str(kook_type),
-        }
+
+        onebot_data = self.build_base_event(data, str(kook_type))
+        onebot_data["id"] = event_id
+        onebot_data["time"] = int(time.time())
+        onebot_data["type"] = self._get_message_type(data)
+        onebot_data["detail_type"] = self._get_detail_type(data)
+        onebot_data["self"]["user_id"] = self.bot_id
         
         if onebot_data["type"] == "message":
             onebot_data["message_id"] = d.get("msg_id", "")
