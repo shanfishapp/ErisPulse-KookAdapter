@@ -12,12 +12,76 @@ from ErisPulse.Core.Bases.websocket import WSMessage
 from .CallApi import CallApi
 from .Converter import KookAdapterConverter
 
+
+def _forward_node_text(node: Dict) -> str:
+    """提取合并转发节点 content 中全部 text 段文本（段间直接连接）"""
+    data = node.get("data") or {}
+    return "".join(
+        str(seg.get("data", {}).get("text") or "")
+        for seg in (data.get("content") or [])
+        if isinstance(seg, dict) and seg.get("type") == "text"
+    )
+
+
+def _forward_nodes_plain(nodes, separator: str = "\n") -> str:
+    """合并转发节点降级纯文本：每条「昵称: 正文」"""
+    lines = []
+    for node in nodes if isinstance(nodes, list) else [nodes]:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") or {}
+        nickname = str(data.get("nickname") or "").strip()
+        text = _forward_node_text(node).strip()
+        if nickname and text:
+            lines.append(f"{nickname}: {text}")
+        elif text:
+            lines.append(text)
+    return separator.join(lines)
+
+
+def _kmd_escape(text: str) -> str:
+    """转义 KMarkdown 特殊字符，避免用户内容破坏卡片排版"""
+    for ch in ("\\", "*", "_", "~", "`", ">", "[", "]"):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def _build_forward_kook_card(nodes, title: str = "合并聊天记录", max_nodes: int = 40):
+    """渲染合并转发为 Kook 卡片（header 标题 + 每条消息一个 section）"""
+    modules = [
+        {"type": "header", "text": {"type": "plain-text", "content": title}}
+    ]
+    count = 0
+    for node in nodes if isinstance(nodes, list) else [nodes]:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") or {}
+        nickname = str(data.get("nickname") or "").strip()
+        text = _forward_node_text(node).strip()
+        if not text:
+            continue
+        if count >= max_nodes:
+            modules.append({
+                "type": "section",
+                "text": {"type": "kmarkdown", "content": "**…（超出部分已截断）**"},
+            })
+            break
+        header = f"**{_kmd_escape(nickname)}**\n" if nickname else ""
+        modules.append({
+            "type": "section",
+            "text": {"type": "kmarkdown", "content": header + _kmd_escape(text)},
+        })
+        count += 1
+    if count == 0:
+        return None
+    return [{"type": "card", "modules": modules}]
+
 try:
     from ErisPulse.runtime.tasks import spawn_background
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.1.0"
+__version__ = "4.2.0"
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -855,6 +919,36 @@ class KookAdapter(BaseAdapter):
         def Card(self, card_data: dict):
             return self.Raw_ob12([{"type": "kook_card", "data": {"card": card_data}}])
 
+        def MergeForward(self, nodes, title: str = "合并聊天记录"):
+            """发送合并转发消息（渲染为 Kook 卡片：标题 + 每条消息一个 section）
+
+            :param nodes: go-cqhttp 扩展的 OneBot v11 合并转发节点数组（或单节点 dict）
+            :param title: 卡片标题
+            :return: asyncio.Task
+            """
+            if isinstance(nodes, dict):
+                nodes = [nodes]
+            return asyncio.create_task(
+                self._do_send_merge_forward(
+                    [n for n in nodes if isinstance(n, dict)], title
+                )
+            )
+
+        async def _do_send_merge_forward(self, nodes, title: str = "合并聊天记录"):
+            card = _build_forward_kook_card(nodes, title)
+            if not card:
+                return self._error_response("MergeForward: 节点无有效文本内容")
+            modifiers = self._build_modifiers()
+            return await self._adapter.call_api(
+                endpoint="/message/create",
+                _account_id=self.send_context.get("account_id"),
+                target_type=self._target_type,
+                target_id=self._target_id,
+                content=json.dumps(card),
+                type=10,
+                **modifiers,
+            )
+
         async def _upload_file(self, file, filename=None):
             if isinstance(file, bytes):
                 upload_result = await self._adapter.call_api(
@@ -904,6 +998,18 @@ class KookAdapter(BaseAdapter):
                         if not (isinstance(s, dict) and s.get("type") == "keyboard")
                     ]
                 self._keyboard_rows = None
+
+                # node 段解析：纯 node 列表自动路由合并转发卡片；混合列表降级为纯文本
+                if segments and all(
+                    isinstance(s, dict) and s.get("type") == "node" for s in segments
+                ):
+                    return await self._do_send_merge_forward(segments)
+                segments = [
+                    {"type": "text", "data": {"text": _forward_nodes_plain(s)}}
+                    if isinstance(s, dict) and s.get("type") == "node"
+                    else s
+                    for s in segments
+                ]
 
                 modifiers = self._build_modifiers()
                 results = []
