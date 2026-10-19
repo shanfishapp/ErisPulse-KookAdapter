@@ -69,3 +69,5 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          # 优先使用 PYPI_API_TOKEN（仓库 secret）；未设置时回退 OIDC 受信任发布者
+          password: ${{ secrets.PYPI_API_TOKEN }}
