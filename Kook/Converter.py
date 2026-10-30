@@ -44,6 +44,8 @@ class KookAdapterConverter(BaseConverter):
             onebot_data["message_id"] = d.get("msg_id", "")
             onebot_data.update({
                 "user_id": author.get("id", ""),
+                # KOOK author 自带昵称，供收件箱/主人候选/记忆等下游直接使用
+                "user_nickname": author.get("nickname") or author.get("username", ""),
                 "message": self._convert_message_content(data),
                 "alt_message": d.get("content", ""),
             })

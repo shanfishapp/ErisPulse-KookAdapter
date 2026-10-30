@@ -81,7 +81,7 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.2.0"
+__version__ = "4.3.0"
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -95,7 +95,7 @@ class KookAccountConfig(BotAccountConfig):
             "description": "Kook Bot Token",
             "required": True,
             "secret": True,
-            "webui": {"widget": "password", "group": "basic", "order": 1},
+            "ui": {"widget": "password", "group": "basic", "order": 1},
         },
     )
     bot_id: str = field(
@@ -103,7 +103,7 @@ class KookAccountConfig(BotAccountConfig):
         metadata={
             "description": "机器人ID（可选，不填则从token推断）",
             "required": False,
-            "webui": {"widget": "text", "group": "basic", "order": 2},
+            "ui": {"widget": "text", "group": "basic", "order": 2},
         },
     )
     compress: bool = field(
