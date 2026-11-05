@@ -81,7 +81,7 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.3.0"
+__version__ = "4.3.1"
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -871,7 +871,7 @@ class KookAdapter(BaseAdapter):
                 modifiers["quote"] = self._reply_message_id
             return modifiers
 
-        def _error_response(self, message: str, retcode: int = -1) -> dict:
+        def _error_response(self, message: str, retcode: int = 10002) -> dict:
             err = self._adapter.make_error(
                 retcode=retcode,
                 message=message,
@@ -955,7 +955,7 @@ class KookAdapter(BaseAdapter):
                     endpoint="/asset/create",
                     _account_id=self.send_context.get("account_id"),
                     file=file,
-                    file_path=filename,
+                    filename=filename,
                 )
             elif isinstance(file, str):
                 if file.startswith(("http://", "https://")):
@@ -963,13 +963,14 @@ class KookAdapter(BaseAdapter):
                         endpoint="/asset/create",
                         _account_id=self.send_context.get("account_id"),
                         file_url=file,
-                        file_path=filename,
+                        filename=filename,
                     )
                 else:
                     upload_result = await self._adapter.call_api(
                         endpoint="/asset/create",
                         _account_id=self.send_context.get("account_id"),
                         file_path=file,
+                        filename=filename,
                     )
             else:
                 return None
@@ -1012,23 +1013,28 @@ class KookAdapter(BaseAdapter):
                 ]
 
                 modifiers = self._build_modifiers()
+                # 段级 mention/mention_all/reply 修饰合并进首条消息的修饰参数
+                for segment in segments:
+                    seg_type = segment.get("type")
+                    seg_data = segment.get("data", {})
+                    if seg_type == "mention":
+                        modifiers.setdefault("mention", [])
+                        if seg_data.get("user_id") not in modifiers["mention"]:
+                            modifiers["mention"].append(seg_data["user_id"])
+                    elif seg_type == "mention_all":
+                        modifiers["mention_all"] = True
+                    elif seg_type == "reply":
+                        modifiers["quote"] = seg_data.get("message_id")
+
                 results = []
                 pending_text = ""
+                modifiers_used = False
 
                 for segment in segments:
                     seg_type = segment.get("type")
                     seg_data = segment.get("data", {})
 
-                    if seg_type == "mention":
-                        modifiers.setdefault("mention", [])
-                        if seg_data.get("user_id") not in modifiers["mention"]:
-                            modifiers["mention"].append(seg_data["user_id"])
-                        continue
-                    elif seg_type == "mention_all":
-                        modifiers["mention_all"] = True
-                        continue
-                    elif seg_type == "reply":
-                        modifiers["quote"] = seg_data.get("message_id")
+                    if seg_type in ("mention", "mention_all", "reply"):
                         continue
 
                     kook_type = self._KOOK_MSG_TYPE_MAP.get(seg_type)
@@ -1067,8 +1073,9 @@ class KookAdapter(BaseAdapter):
                         target_id=self._target_id,
                         content=content,
                         type=kook_type,
-                        **modifiers,
+                        **({} if modifiers_used else modifiers),
                     )
+                    modifiers_used = True
                     results.append(result)
 
                 # 有键盘未消费时，将暂存文本组装为卡片消息发送
@@ -1081,7 +1088,7 @@ class KookAdapter(BaseAdapter):
                         target_id=self._target_id,
                         content=json.dumps(card),
                         type=10,
-                        **modifiers,
+                        **({} if modifiers_used else modifiers),
                     )
                     results.append(result)
 
