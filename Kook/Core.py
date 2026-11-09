@@ -81,7 +81,7 @@ try:
 except ImportError:  # pragma: no cover
     spawn_background = None
 
-__version__ = "4.3.1"
+__version__ = "4.3.2"
 
 # 软依赖的框架最低版本（运行时检测，仅提示不强制）
 MIN_FRAMEWORK_VERSION = (2, 7, 1)
@@ -604,6 +604,7 @@ class KookAdapter(BaseAdapter):
 
         try:
             onebot_event = converter.convert(data)
+            onebot_event["self"]["account_id"] = account_name
             await self.sdk.adapter.emit(onebot_event)
             self.logger.debug(
                 f"[{account_name}] 事件已分发: "
@@ -671,11 +672,17 @@ class KookAdapter(BaseAdapter):
         - /message/delete + target_type=user -> delete_direct_message (删除私信消息)
         - /asset/create -> upload_file
         """
-        account_name, account = self._resolve_account(_account_id)
+                # 标准字段 account_id 与旧名 _account_id 双兼容（ApiDSL.Using 传标准名）
+        account_id = params.pop("account_id", None) or _account_id
+        account_name, account = self._resolve_account(account_id)
         rt = self._get_runtime(account_name)
         api = rt.get("api")
         if api is None:
-            raise RuntimeError(f"账户 {account_name} 的 API 实例未初始化")
+            return self.make_error(
+                retcode=33001,
+                message=f"账户 {account_name} 的 API 实例未初始化",
+                raw=None,
+            )
 
         target_type = params.get("target_type", "group")
 
@@ -700,7 +707,11 @@ class KookAdapter(BaseAdapter):
         elif endpoint == "/asset/create":
             return await api.upload_asset(**params)
         else:
-            raise ValueError(f"未知的 API endpoint: {endpoint}")
+            return self.make_error(
+                retcode=10002,
+                message=f"未知的 API endpoint: {endpoint}",
+                raw=None,
+            )
 
     # ------------------------------------------------------------------
     # Api 类（OneBot12 标准Api动作映射）
@@ -757,6 +768,12 @@ class KookAdapter(BaseAdapter):
                 return r
             g = r.get("data") or {}
             r["data"] = {
+                "guild_id": str(g.get("id", guild_id)),
+                "guild_name": g.get("name", ""),
+                "guild_avatar": g.get("icon", ""),
+                "guild_member_count": g.get("user_count", 0),
+                "guild_master_id": str(g.get("master_id", "")),
+                # 旧字段保留，避免破坏已有调用方
                 "group_id": str(g.get("id", guild_id)),
                 "group_name": g.get("name", ""),
                 "group_avatar": g.get("icon", ""),
@@ -773,13 +790,22 @@ class KookAdapter(BaseAdapter):
                 return r
             items = r.get("data", {}).get("items", []) or []
             r["data"] = [
-                {"group_id": str(g.get("id", "")), "group_name": g.get("name", "")}
+                {
+                    "guild_id": str(g.get("id", "")),
+                    "guild_name": g.get("name", ""),
+                    # 旧字段保留，避免破坏已有调用方
+                    "group_id": str(g.get("id", "")),
+                    "group_name": g.get("name", ""),
+                }
                 for g in items
                 if isinstance(g, dict)
             ]
             return r
 
-        async def get_channel_info(self, channel_id: str) -> dict:
+        async def get_channel_info(self, guild_id=None, channel_id=None) -> dict:
+            # 兼容旧签名 get_channel_info(channel_id)：只传一个位置参数时视为 channel_id
+            if channel_id is None:
+                guild_id, channel_id = None, guild_id
             r = await self._api.request("POST", "/channel/view", {"channel_id": str(channel_id)})
             if r.get("status") != "ok":
                 return r
@@ -808,11 +834,29 @@ class KookAdapter(BaseAdapter):
             ]
             return r
 
-        async def get_channel_member_list(self, channel_id: str) -> dict:
+        async def get_channel_member_list(self, guild_id=None, channel_id=None) -> dict:
             """获取频道内成员列表（扩展动作）"""
+            # 兼容旧签名 get_channel_member_list(channel_id)：只传一个位置参数时视为 channel_id
+            if channel_id is None:
+                guild_id, channel_id = None, guild_id
             return await self._api.request(
                 "POST", "/channel/user-list", {"channel_id": str(channel_id)}
             )
+
+        async def get_guild_member_info(self, guild_id: str, user_id: str) -> dict:
+            return self._adapter.make_error(retcode=10002, message="Kook 暂不支持获取服务器成员信息")
+
+        async def get_guild_member_list(self, guild_id: str) -> dict:
+            return self._adapter.make_error(retcode=10002, message="Kook 暂不支持获取服务器成员列表")
+
+        async def set_guild_name(self, guild_id: str, guild_name: str) -> dict:
+            return self._adapter.make_error(retcode=10002, message="Kook 暂不支持修改服务器名称")
+
+        async def leave_guild(self, guild_id: str) -> dict:
+            return self._adapter.make_error(retcode=10002, message="Kook 暂不支持退出服务器")
+
+        async def leave_channel(self, guild_id: str, channel_id: str) -> dict:
+            return self._adapter.make_error(retcode=10002, message="Kook 暂不支持退出频道")
 
         async def delete_message(self, message_id: str) -> dict:
             return await self._adapter.call_api(

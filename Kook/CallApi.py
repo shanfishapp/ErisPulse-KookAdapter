@@ -91,7 +91,7 @@ class CallApi:
         """将 Kook API 响应标准化为 OneBot12 风格响应"""
         if not isinstance(raw_response, dict):
             return self.adapter.make_error(
-                retcode=34000,
+                retcode=34100,
                 message=f"API 返回了意外格式: {type(raw_response)}",
                 raw=raw_response,
             )
@@ -111,18 +111,20 @@ class CallApi:
                 retcode=0,
                 data=standardized_data,
                 message_id=kook_msg_id,
-                message=msg or "操作成功",
+                message=msg,
                 raw=raw_response,
             )
             resp["kook_raw"] = raw_response
             return resp
         else:
+            # 平台返回错误统一 34100，Kook 原始 code 保留在 kook_raw 中
             err = self.adapter.make_error(
-                retcode=code,
+                retcode=34100,
                 message=msg or f"操作失败 (code={code})",
                 raw=raw_response,
             )
             err["kook_raw"] = raw_response
+            err["kook_code"] = code
             return err
 
     def _token_error(self) -> dict:
@@ -487,4 +489,4 @@ class CallApi:
             raw = await resp.json()
             return self._standardize(raw)
         except Exception as e:
-            return self.adapter.make_error(retcode=33000, message=f"Kook API 请求异常: {e}", raw=None)
+            return self.adapter.make_error(retcode=33001, message=f"Kook API 请求异常: {e}", raw=None)
